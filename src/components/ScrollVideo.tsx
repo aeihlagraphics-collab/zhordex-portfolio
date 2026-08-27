@@ -6,10 +6,12 @@ const VIDEO_URL =
 export default function ScrollVideo() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameCache = useRef<ImageBitmap[]>([]);
+  const hdCache = useRef<ImageBitmap[]>([]);
   const smoothedProgress = useRef(0);
   const targetProgress = useRef(0);
   const rafId = useRef<number>(0);
   const cacheReady = useRef(false);
+  const hdReady = useRef(false);
   const lastDrawnIdx = useRef(-1);
   const totalFrames = useRef(0);
 
@@ -19,9 +21,13 @@ export default function ScrollVideo() {
     const dpr = Math.min(window.devicePixelRatio, 2);
     const isMobile = window.innerWidth < 768;
 
-    // ── how many frames & what resolution ──
-    const FRAME_COUNT = isMobile ? 40 : 60;
-    const TARGET_WIDTH = isMobile ? 640 : 1080;
+// ── Phase 1: fast low-res preview ──
+const LQ_FRAMES = isMobile ? 10 : 15;
+const LQ_WIDTH = isMobile ? 320 : 480;
+
+// ── Phase 2: full HD swap ──
+const HQ_FRAMES = isMobile ? 50 : 80;
+const HQ_WIDTH = isMobile ? 960 : 1920;
 
     // ── resize canvas ──
     function resizeCanvas() {
@@ -44,18 +50,24 @@ export default function ScrollVideo() {
 
     // ── draw frame ──
     function drawFrame(progress: number) {
-      const frames = frameCache.current;
+      // prefer HD cache once it starts filling in
+      const useHD = hdReady.current && hdCache.current.length > 0;
+      const frames = useHD ? hdCache.current : frameCache.current;
+      const total = useHD ? HQ_FRAMES : totalFrames.current;
+
       if (frames.length === 0) return;
-      // only draw up to how many frames are ready so far
+
       const available = frames.length - 1;
       const idx = Math.min(
-        Math.round(progress * (totalFrames.current - 1)),
+        Math.round(progress * (total - 1)),
         available
       );
       if (idx === lastDrawnIdx.current) return;
       lastDrawnIdx.current = idx;
+
       const bmp = frames[idx];
       if (!bmp) return;
+
       const cw = canvas.width;
       const ch = canvas.height;
       const { x, y, w, h } = coverRect(bmp.width, bmp.height, cw, ch);
@@ -84,8 +96,45 @@ export default function ScrollVideo() {
     }
     rafId.current = requestAnimationFrame(loop);
 
-    // ── extract frames ──
-    async function extractFrames() {
+    // ── generic frame extractor ──
+    async function extractFrames(
+      vid: HTMLVideoElement,
+      frameCount: number,
+      targetWidth: number,
+      onFirstFrame?: () => void
+    ): Promise<ImageBitmap[]> {
+      const dur = vid.duration;
+      if (!dur || !isFinite(dur)) return [];
+
+      const vw = vid.videoWidth || 1920;
+      const vh = vid.videoHeight || 1080;
+      const scale = Math.min(1, targetWidth / vw);
+      const fw = Math.round(vw * scale);
+      const fh = Math.round(vh * scale);
+
+      const offCanvas = document.createElement("canvas");
+      offCanvas.width = fw;
+      offCanvas.height = fh;
+      const offCtx = offCanvas.getContext("2d")!;
+
+      const cache: ImageBitmap[] = [];
+
+      for (let i = 0; i < frameCount; i++) {
+        const t = (i / (frameCount - 1)) * (dur - 0.05);
+        vid.currentTime = t;
+        await new Promise<void>((res) => { vid.onseeked = () => res(); });
+        offCtx.drawImage(vid, 0, 0, fw, fh);
+        const bmp = await createImageBitmap(offCanvas);
+        cache.push(bmp);
+
+        if (i === 0 && onFirstFrame) onFirstFrame();
+      }
+
+      return cache;
+    }
+
+    // ── create & load video element ──
+    async function createVideo(): Promise<HTMLVideoElement> {
       const vid = document.createElement("video");
       vid.src = VIDEO_URL;
       vid.muted = true;
@@ -99,45 +148,77 @@ export default function ScrollVideo() {
         vid.load();
       });
 
-      const dur = vid.duration;
-      if (!dur || !isFinite(dur)) return;
+      return vid;
+    }
 
-      totalFrames.current = FRAME_COUNT;
+    // ── Phase 1: load LQ frames fast ──
+async function loadLQ() {
+  const vid = await createVideo();
+  totalFrames.current = LQ_FRAMES;
 
-      const vw = vid.videoWidth || 1920;
-      const vh = vid.videoHeight || 1080;
-      const scale = Math.min(1, TARGET_WIDTH / vw);
-      const fw = Math.round(vw * scale);
-      const fh = Math.round(vh * scale);
+  // ── grab frame 0 instantly at tiny resolution ──
+  const thumbCanvas = document.createElement("canvas");
+  thumbCanvas.width = 320;
+  thumbCanvas.height = 180;
+  const thumbCtx = thumbCanvas.getContext("2d")!;
+  vid.currentTime = 0;
+  await new Promise<void>((res) => { vid.onseeked = () => res(); });
+  thumbCtx.drawImage(vid, 0, 0, 320, 180);
+  const thumbBmp = await createImageBitmap(thumbCanvas);
+  frameCache.current = [thumbBmp];
+  totalFrames.current = 1;
+  cacheReady.current = true;
+  canvas.style.opacity = "1"; // ✅ shows within ~1s
 
-      const offCanvas = document.createElement("canvas");
-      offCanvas.width = fw;
-      offCanvas.height = fh;
-      const offCtx = offCanvas.getContext("2d")!;
+  // ── now load the rest of the LQ frames ──
+  const frames = await extractFrames(
+    vid,
+    LQ_FRAMES,
+    LQ_WIDTH
+  );
 
-      for (let i = 0; i < FRAME_COUNT; i++) {
-        const t = (i / (FRAME_COUNT - 1)) * (dur - 0.05);
-        vid.currentTime = t;
-        await new Promise<void>((res) => { vid.onseeked = () => res(); });
-        offCtx.drawImage(vid, 0, 0, fw, fh);
-        const bmp = await createImageBitmap(offCanvas);
-        frameCache.current.push(bmp);
+  frameCache.current = frames;
+  totalFrames.current = LQ_FRAMES;
+  lastDrawnIdx.current = -1;
+  return vid;
+}
 
-        // ── show first frame immediately ──
-        if (i === 0) {
-          cacheReady.current = true;
-          canvas.style.opacity = "1";
-        }
+    // ── Phase 2: silently swap in HQ frames ──
+    async function loadHQ(vid: HTMLVideoElement) {
+      const frames = await extractFrames(
+        vid,
+        HQ_FRAMES,
+        HQ_WIDTH
+      );
+
+      // swap in HD frames and free LQ memory
+      hdCache.current = frames;
+      hdReady.current = true;
+      lastDrawnIdx.current = -1; // force redraw at HD
+
+      // free LQ bitmaps
+      frameCache.current.forEach((b) => b.close());
+      frameCache.current = [];
+    }
+
+    // ── run both phases ──
+    async function run() {
+      try {
+        const vid = await loadLQ();
+        await loadHQ(vid); // starts immediately after LQ is done
+      } catch (e) {
+        console.error("ScrollVideo error:", e);
       }
     }
 
-    extractFrames().catch(console.error);
+    run();
 
     return () => {
       cancelAnimationFrame(rafId.current);
       window.removeEventListener("scroll", updateScroll);
       window.removeEventListener("resize", resizeCanvas);
       frameCache.current.forEach((b) => b.close());
+      hdCache.current.forEach((b) => b.close());
     };
   }, []);
 
