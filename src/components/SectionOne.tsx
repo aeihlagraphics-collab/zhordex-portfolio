@@ -50,9 +50,9 @@ export default function SectionOne() {
         </div>
         <Reveal delay={420}>
           <div className="flex items-center gap-4 rounded-xl bg-white/15 p-3 backdrop-blur-md">
-            <div className="flex h-24 w-20 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xl font-semibold text-white">
-              ZC
-            </div>
+            <div className="flex h-24 w-20 shrink-0 items-center justify-center rounded-lg overflow-hidden">
+  <img src="/profile.jpg" alt="Zhordex B. Carino Jr" className="h-full w-full object-cover object-top" />
+</div>
             <div className="flex flex-col gap-1.5 pr-2">
               <span className="text-sm font-medium text-white">Zhordex B. Carino Jr</span>
               <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-white/60">
